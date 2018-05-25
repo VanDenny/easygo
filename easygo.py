@@ -1,5 +1,6 @@
 import requests
 from multiprocessing.dummy import Pool as ThreadPool
+from selenium.webdriver import ActionChains
 import sys
 from selenium import webdriver
 import time
@@ -59,6 +60,7 @@ class Easygo_Params(dict):
 class Easygo_Clawer(Clawer):
     req_num = 0
     account_list = account_reader('D:\program_lib\QQ_Tool\qq_pool.xlsx')
+    account_reader_times = 0
     used_account = []
     cookies = {}
     def __init__(self, params):
@@ -67,6 +69,7 @@ class Easygo_Clawer(Clawer):
         self.headers.update(self.referer)
         self.url = "http://c.easygo.qq.com/api/egc/heatmapdata"
         self.cookies = Easygo_Clawer.cookies
+        self.qq_account = ''
         # print(self.cookies)
 
     def scheduler(self):
@@ -74,7 +77,7 @@ class Easygo_Clawer(Clawer):
             self.status_change_cookies()
             # print(self.cookies)
             Easygo_Clawer.req_num += 1
-        elif self.req_num <= 100:
+        elif self.req_num <= 130:
             self.requestor()
             Easygo_Clawer.req_num += 1
         else:
@@ -94,7 +97,8 @@ class Easygo_Clawer(Clawer):
     def parser(self, json_dict):
         print(json_dict)
         datas = json_dict.get('data')
-        if isinstance(datas, list) and len(datas)!=0:
+        codes = json_dict.get('code')
+        if codes == 0 and len(datas) != 0:
             points = []
             min_count = datas[0]['count']
             for i in datas:
@@ -111,10 +115,18 @@ class Easygo_Clawer(Clawer):
                 points.append(point)
             Easygo_Clawer.cookies = self.cookies
             return points
-        elif isinstance(datas, list) and len(datas) == 0:
+        elif codes == 0 and len(datas) == 0:
             print("此区域没有点信息")
             logger.info("此区域没有点信息 %s" % self.req_url)
-        elif isinstance(datas, str):
+        elif codes == 3:
+            logger.info("%s 账号需要验证" % self.qq_account)
+            time.sleep(3)
+            self.cookies = self.get_cookie()
+            points = self.process()
+            Easygo_Clawer.req_num = 1
+            return points
+        elif codes == -100:
+            logger.info("%s 账号已用完" % self.qq_account)
             time.sleep(3)
             self.cookies = self.get_cookie()
             points = self.process()
@@ -122,7 +134,7 @@ class Easygo_Clawer(Clawer):
             return points
         else:
             print(json_dict)
-            logger.info('%s 链接是 %s' % (json_dict, self.req_url))
+            logger.info("%s 账号出现未知错误" % self.qq_account)
 
     def read_account(self, file_path):
         df = pd.read_excel(file_path)
@@ -132,33 +144,66 @@ class Easygo_Clawer(Clawer):
 
 
     def get_cookie(self):
+        self.driver = webdriver.Chrome()
+        self.driver.set_window_size(200, 300)
         if self.account_list:
             account = Easygo_Clawer.account_list.pop()
-            chrome_login = webdriver.Chrome()
-            def login():
-                chrome_login.get("http://c.easygo.qq.com/eg_toc/map.html?origin=csfw&cityid=110000")
-                chrome_login.find_element_by_id("u").send_keys(account['account'])
-                chrome_login.find_element_by_id("p").send_keys(account['password'])
-                chrome_login.find_element_by_id("go").click()
+            self.qq_account = str(account['account'])
+            self.qq_password = str(account['password'])
+            print('账号状况：剩余：%s' % len(Easygo_Clawer.account_list))
             try:
-                login()
+                self.login(self.qq_account, self.qq_password)
             except:
                 time.sleep(2)
-                login()
+                self.login(self.qq_account, self.qq_password)
             time.sleep(3)
-            cookies = chrome_login.get_cookies()
-            chrome_login.quit()
+            self.scheduler_by_url()
+            cookies = self.driver.get_cookies()
             user_cookie = {}
             for cookie in cookies:
                 user_cookie[cookie["name"]] = cookie["value"]
             account['date'] = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
             Easygo_Clawer.used_account.append(account)
             time.sleep(2)
+            self.driver.quit()
             return user_cookie
+        elif Easygo_Clawer.account_reader_times == 0:
+            Easygo_Clawer.account_list = account_reader('D:\program_lib\QQ_Tool\qq_pool.xlsx')
+            Easygo_Clawer.account_reader_times += 1
+            return self.get_cookie()
         else:
-            new_df = pd.DataFrame(Easygo_Clawer.used_account)
+            new_df = pd.DataFrame(self.used_account)
             new_df.to_excel('D:\program_lib\QQ_Tool\qq_pool.xlsx')
             raise CookieException('今日账号已用完')
+
+    def login(self, account, password):
+        self.driver.get("http://c.easygo.qq.com/eg_toc/map.html?origin=csfw")
+        self.driver.find_element_by_id("u").send_keys(account)
+        self.driver.find_element_by_id("p").send_keys(password)
+        self.driver.find_element_by_id("go").click()
+
+    def scheduler_by_url(self):
+        current_url = self.driver.current_url
+        current_url = current_url.split('?')[0]
+        if current_url in 'http://c.easygo.qq.com/eg_toc/map.html?origin=csfw':
+            print('登录成功')
+        elif current_url == 'http://ui.ptlogin2.qq.com/cgi-bin/login':
+            self.captcha()
+
+    def captcha(self):
+        self.driver.switch_to.frame('tcaptcha_iframe')
+        button = self.driver.find_element_by_id('tcaptcha_drag_button')
+        while True:
+            ActionChains(self.driver).move_to_element(button).click_and_hold(button).perform()
+            ActionChains(self.driver).move_by_offset(176, 0).release().perform()
+            time.sleep(2)
+
+            if "登录" in self.driver.page_source:
+                dialog = self.driver.find_elements_by_class_name('qui-dialog-box')
+                if dialog:
+                    print('登录不成功')
+                break
+
 
 
 def view_bar(num, total):
@@ -168,13 +213,16 @@ def view_bar(num, total):
     sys.stdout.write(r)
 
 
-def main(region_name, origin_rect):
+def main(region_name, origin_rects):
     name = region_name
-    sample_generator = Sample_Generator(name)
-    sample_generator.filter_radius([origin_rect], 4000)
-    rect_list = sample_generator.radius_sati_rects
+    # sample_generator = Sample_Generator(name)
+    # 东莞4000
+    # sample_generator.filter_radius(origin_rects, 4000)
+    # rect_list = sample_generator.radius_sati_rects
+    rect_list = origin_rects
+    # print(rect_list)
     def by_rect(rect):
-        easy_params = Easygo_Params(rect, '东莞')
+        easy_params = Easygo_Params(rect, '威海')
         easy_clawer = Easygo_Clawer(easy_params)
         return easy_clawer.process()
 
@@ -196,21 +244,33 @@ def main(region_name, origin_rect):
 def easygo_func():
     try:
         email_alarm = Email_alarm()
-        sf_reader = Shapefile_Reader(r'D:\GIS_workspace\东莞\东莞')
-        rect_list = sf_reader.convert_to_rect(16)
+        sf_reader = Shapefile_Reader(r'D:\GIS_workspace\地理边界\威海\威海采样4000_wgc84')
+        rect_list = sf_reader.convert_to_rect(3)
+        print(rect_list)
+        categry_dict = {}
         for rect in rect_list:
-            main(rect[0], rect[1])
+            # print(categry_dict)
+            if rect[0] in categry_dict and rect[1]:
+                # print('键值为 %s' % rect[0])
+                categry_dict[rect[0]].append(rect[1])
+            else:
+                categry_dict[rect[0]] = []
+        print(categry_dict)
+        for categry in categry_dict.items():
+            # print(categry)
+            main(categry[0], categry[1])
     except:
         print(traceback.print_exc())
         email_alarm.send_mail('宜出行抓取，软件崩了，快去看下吧')
 
 if __name__ == "__main__":
-    Cycle_Scheduler().by_time_point(['0600', '0700', '0800',
+    Cycle_Scheduler().by_time_point(['0500', '0600', '0700', '0800',
                                      '0900', '1000', '1100',
                                      '1200', '1300', '1400',
                                      '1500', '1600', '1700',
-                                     '1800', '1900', '2000',
-                                     '2100', '2200', '2300'
+                                     '1800', '1908', '2000',
+                                     '2100', '2200', '2300',
+                                     '0000'
                                      ], '%H%M', easygo_func)
 
 
